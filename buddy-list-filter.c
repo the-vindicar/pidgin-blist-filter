@@ -998,8 +998,7 @@ static PurplePluginInfo info = {
 	PLUGIN_VERSION, //Visible plugin version
 	"Allows user to set up custom filters (views) of their buddy list.", //Short plugin description
 	//Long plugin description
-	"This plugin allows user to set up a set of custom views of their buddy list, filtering out all contacts except matching specific criteria. "
-	"Those criteria are: IM account, buddy name pattern, buddy group name pattern, buddy type (user/chat room).\n"
+	"This plugin allows user to set up a set of custom views of their buddy list, showing/hiding groups matching specific pattern."
 	"It should allow you to structure your buddy list into 'tabs' instead of having to work with one long flat list.",
 	"Alex Orlov <the.vindicar@gmail.com>", //plugin author
 	"https://github.com/the-vindicar/pidgin-blist-filter",//plugin homepage or github repo
