@@ -123,7 +123,7 @@ static void debug_node(PurpleBlistNode* node)
 //Empty list will match any string. Empty string will match any list.
 static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
 {
-	gboolean match;
+	gboolean has_positive_matches, has_negative_matches, has_any_positives;
 	guint length;
 	char* reversed;
 	BListFilter* item;
@@ -131,14 +131,23 @@ static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
 	if (!value || *value == '\0' || !patterns) return TRUE;
 	length = strlen(value);
 	reversed = g_utf8_strreverse(value, length);
-	match = FALSE;
-	for (GList* i = patterns; !match && (i != NULL); i = i->next)
+	has_positive_matches = FALSE; //did string match any positive filter?
+	has_negative_matches = FALSE; //did string match any negative filter?
+	has_any_positives = FALSE; //was there even any positive filter?
+	for (GList* i = patterns; i != NULL; i = i->next)
 	{
 		item = (BListFilter*)i->data;
-		match = g_pattern_match(item->pattern, length, value, reversed) ^ item->inverted;
+		if (item->inverted)
+			has_negative_matches = has_negative_matches || g_pattern_match(item->pattern, length, value, reversed);
+		else
+		{
+			has_positive_matches = has_positive_matches || g_pattern_match(item->pattern, length, value, reversed);
+			has_any_positives = TRUE;
+		}
 	}
 	g_free(reversed);
-	return match;
+	//we show only groups that match ANY positive filter (if such filters exist), but also don't match ANY of the negative filters
+	return (!has_any_positives || has_positive_matches) && !has_negative_matches;
 }
 //Checks if a group node matches the specified filter. 
 // - Group has at least one visible child item, either due to filter or because it's a non-standard item.
@@ -363,7 +372,7 @@ static void blistfilter_make_vertical_selector_gui()
 	selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
 	spacing = purple_prefs_get_int(PLUGIN_PREF_ROOT "/buttons_spacing");
 	blistfilter_gui->box = g_object_ref(gtk_vbox_new(TRUE, spacing));
-	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui->box), TRUE);
+	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui->box), purple_prefs_get_bool(PLUGIN_PREF_ROOT "/homogenous_buttons"));
 	gtk_widget_set_name(GTK_WIDGET(blistfilter_gui->box), "blistfilter_gui_box");
 	
 	filter_id = 0;
@@ -413,11 +422,13 @@ static void blistfilter_make_horizontal_selector_gui()
 	BListFilterDescription* filter;
 	GtkRadioButton* btn;
 	GSList* group;
+	gboolean always_show_titles, has_icon, has_text;
 	
+	always_show_titles = purple_prefs_get_bool(PLUGIN_PREF_ROOT "/force_titles");
 	selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
 	spacing = purple_prefs_get_int(PLUGIN_PREF_ROOT "/buttons_spacing");
 	blistfilter_gui->box = g_object_ref(gtk_hbox_new(TRUE, spacing));
-	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui->box), TRUE);
+	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui->box), purple_prefs_get_bool(PLUGIN_PREF_ROOT "/homogenous_buttons"));
 	gtk_widget_set_name(GTK_WIDGET(blistfilter_gui->box), "blistfilter_gui_box");
 	
 	filter_id = 0;
@@ -425,23 +436,28 @@ static void blistfilter_make_horizontal_selector_gui()
 	for (GList* item = blistfilter_filters; item != NULL; item = item->next)
 	{
 		filter = (BListFilterDescription*) item->data;
+		has_text = (filter->name && filter->name[0]);
+		has_icon = (filter->icon_path && filter->icon_path[0]);  
 		btn = GTK_RADIO_BUTTON(gtk_radio_button_new(group));
 		group = gtk_radio_button_get_group(btn);
-		if (filter->name && filter->name[0])
+		if (has_text)
 			gtk_widget_set_tooltip_text(GTK_WIDGET(btn), filter->name);
 		gtk_button_set_focus_on_click(GTK_BUTTON(btn), FALSE);
-		if (filter->icon_path && filter->icon_path[0]) //neither NULL nor empty string
+		if (has_icon)  //neither NULL nor empty string
 		{
 			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
 			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_TOP);
 		}
-		else if (filter->name && filter->name[0])
-			gtk_button_set_label(GTK_BUTTON(btn), filter->name);
-		else
+		if (!has_icon || always_show_titles)
 		{
-			char buf[32];
-			snprintf(buf, 32, "%d", filter_id+1);
-			gtk_button_set_label(GTK_BUTTON(btn), buf);
+			if (has_text)
+				gtk_button_set_label(GTK_BUTTON(btn), filter->name);
+			else
+			{
+				char buf[32];
+				snprintf(buf, 32, "%d", filter_id+1);
+				gtk_button_set_label(GTK_BUTTON(btn), buf);
+			}
 		}
 		gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), selected_index == filter_id);
@@ -456,6 +472,7 @@ static void blistfilter_make_horizontal_selector_gui()
 		filter_id++;
 	}
 }
+
 
 static void blistfilter_make_filter_selector_gui()
 {
@@ -813,9 +830,11 @@ static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 	toptext = gtk_label_new(
 		"Pattern cheatsheet:\n"
 		"    Work - matches a group named 'Work'\n" 
-		"    ~Work - matches every group except one named 'Work'\n" 
+		"    ~Work - matches any group except one named 'Work'\n" 
 		"    Work: * - matches groups like 'Work: HR' or 'Work: Accounting'\n" 
 		"    Friends|Family - matches a group named 'Friends' and a group named 'Family'\n"
+		"    Work: *|~Work: IT - matches any group named like 'Work: HR' or 'Work: Accounting', unless it's 'Work: IT'\n"
+		"    ~Work: HR|~Work: IT - matches any group except 'Work: HR' and 'Work: IT'\n"
 		"    Empty pattern (no spaces!) matches everything." 
 	);
 	gtk_box_pack_start(GTK_BOX(dlgbox), toptext, FALSE, FALSE, 0);
@@ -927,6 +946,8 @@ static gboolean plugin_load (PurplePlugin * plugin)
 
 	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/buttons_spacing", blistfilter_gui_setting_changed_cb, NULL);
 	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/selector_style", blistfilter_gui_setting_changed_cb, NULL);
+	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/force_titles", blistfilter_gui_setting_changed_cb, NULL);
+	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/homogenous_buttons", blistfilter_gui_setting_changed_cb, NULL);
 	
 	purple_signal_connect(purple_blist_get_handle(),
 		"blist-node-added",
@@ -963,7 +984,13 @@ static PurplePluginPrefFrame* get_plugin_pref_frame(PurplePlugin* plugin)
 	purple_plugin_pref_add_choice(pref, "Horizontal list (top)", GINT_TO_POINTER(FST_HORIZONTAL_TOP));
 	purple_plugin_pref_add_choice(pref, "Horizontal list (bottom)", GINT_TO_POINTER(FST_HORIZONTAL_BOTTOM));
 	purple_plugin_pref_frame_add(frame, pref);
-	
+
+	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/force_titles", "Always show filter names");
+	purple_plugin_pref_frame_add(frame, pref);
+
+	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/homogenous_buttons", "Keep all buttons same size");
+	purple_plugin_pref_frame_add(frame, pref);
+
 	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/buttons_spacing", "Selector button spacing (px)");
 	purple_plugin_pref_set_bounds(pref, 0, 1280);
 	purple_plugin_pref_frame_add(frame, pref);
@@ -998,7 +1025,7 @@ static PurplePluginInfo info = {
 	PLUGIN_VERSION, //Visible plugin version
 	"Allows user to set up custom filters (views) of their buddy list.", //Short plugin description
 	//Long plugin description
-	"This plugin allows user to set up a set of custom views of their buddy list, showing/hiding groups matching specific pattern."
+	"This plugin allows user to set up a set of custom views of their buddy list, showing/hiding groups matching specific pattern.\n"
 	"It should allow you to structure your buddy list into 'tabs' instead of having to work with one long flat list.",
 	"Alex Orlov <the.vindicar@gmail.com>", //plugin author
 	"https://github.com/the-vindicar/pidgin-blist-filter",//plugin homepage or github repo
@@ -1031,6 +1058,8 @@ init_plugin (PurplePlugin * plugin)
 	purple_prefs_add_int(PLUGIN_PREF_ACTIVE_FILTER, 0);
 	purple_prefs_add_int(PLUGIN_PREF_ROOT "/buttons_spacing", 0);
 	purple_prefs_add_bool(PLUGIN_PREF_ROOT "/selector_style", FST_VERTICAL_TOP);
+	purple_prefs_add_bool(PLUGIN_PREF_ROOT "/force_titles", FALSE);
+	purple_prefs_add_bool(PLUGIN_PREF_ROOT "/homogenous_buttons", FALSE);
 }
 
 PURPLE_INIT_PLUGIN (vindicar_buddylistfilter, init_plugin, info)
