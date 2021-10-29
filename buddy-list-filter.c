@@ -57,6 +57,7 @@
 #include <version.h>
 #include <util.h>
 #include <gtkblist.h>
+#include <gtkconv.h>
 #include "gtkutils.h"
 #include "gtkplugin.h"
 
@@ -68,6 +69,7 @@
 #define PLUGIN_PREF_SELECTOR_STYLE PLUGIN_PREF_ROOT "/selector_style"
 #define PLUGIN_PREF_FORCE_TITLES PLUGIN_PREF_ROOT "/force_titles"
 #define PLUGIN_PREF_HOMOGENOUS_BTNS PLUGIN_PREF_ROOT "/homogenous_buttons"
+#define PLUGIN_PREF_TRACK_UNREAD PLUGIN_PREF_ROOT "/track_unread"
 #define PLUGIN_PREF_NTH_NAME PLUGIN_PREF_ROOT "/filters/filter%d/name"
 #define PLUGIN_PREF_NTH_ICON PLUGIN_PREF_ROOT "/filters/filter%d/icon_path"
 #define PLUGIN_PREF_NTH_GROUP PLUGIN_PREF_ROOT "/filters/filter%d/group_patterns"
@@ -93,6 +95,7 @@ typedef struct
 	const char* name;
 	const char* icon_path;
 	GList* group_patterns;
+	int matching_unreads;
 } BListFilterDescription;
 //This global list stores currently active compiled filters
 static GList* blistfilter_filters;
@@ -216,6 +219,58 @@ static void blistfilter_update_entire_blist(BListFilterDescription* filter)
 	}
 }
 
+//Loads unread convo count
+static void blistfilter_update_all_unread_counters()
+{
+	GList* convos;
+	PurpleConversation* conv;
+	BListFilterDescription* filter;
+	PurpleBlistNode* node;
+
+	if (!blistfilter_filters) return;
+	//reset all counters to zero
+	for (GList* item = blistfilter_filters; item != NULL; item = item->next)
+	{
+		filter = (BListFilterDescription*)item->data;
+		if (filter) filter->matching_unreads = 0;
+	}
+	//get list of conversations with unread messages
+	convos = pidgin_conversations_find_unseen_list(PURPLE_CONV_TYPE_ANY, PIDGIN_UNSEEN_TEXT, TRUE, 0);
+	for (GList* item = convos; item != NULL; item = item->next)
+		if ((conv = (PurpleConversation*)item->data) != NULL)
+		{
+			switch (conv->type) //looking for buddy list node corresponsing to this conversation
+			{
+				case PURPLE_CONV_TYPE_IM:
+				{	//if it's an IM, we look for a buddy
+					PurpleBuddy* buddy;
+					buddy = purple_find_buddy(conv->account, purple_conversation_get_name(conv));
+					node = buddy ? &(buddy->node) : NULL;
+				}; break;
+				case PURPLE_CONV_TYPE_CHAT:
+				{	//if it's a chat, we look for a chat room
+					PurpleChat* chat;
+					chat = purple_blist_find_chat(conv->account, purple_conversation_get_name(conv));
+					node = chat ? &(chat->node) : NULL;
+				}; break;
+				default: node = NULL; break; //we ignore everything else
+			}
+			while (node && !PURPLE_BLIST_NODE_IS_GROUP(node)) //looking for the group containing this node
+				node = node->parent;
+			if (node) //did we find the group?
+			{
+				//now bump counters on every filter that matches this group
+				for (GList* item = blistfilter_filters; item != NULL; item = item->next)
+				{
+					filter = (BListFilterDescription*)item->data;
+					if (filter && blistfilter_match_group(node, filter))
+						filter->matching_unreads++;
+				} 				
+			}
+		}
+	g_list_free(convos);
+}
+
 //====================== Pref structs and funcs ======================
 //Prepares a pref template for a filter with given id. Will not overwrite existing values!
 static void blistfilter_make_filter_pref(int filter_id)
@@ -288,8 +343,6 @@ static BListFilterDescription* blistfilter_load_filter_pref(int filter_id)
 		return NULL;
 	filter = g_new0(BListFilterDescription, 1);
 	filter->name = purple_prefs_get_string(pref_name_buffer);
-	if (!filter->name || *(filter->name) == '\0')
-		filter->name = "<unnamed filter>";
 	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_ICON, filter_id);
 	filter->icon_path = purple_prefs_get_path(pref_name_buffer);
 	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
@@ -366,7 +419,7 @@ static void blistfilter_destroy_filter_selector_gui()
 	}
 }
 //configures label and icon of a filter button, depending on filter settings and unread messages count
-static void blistfilter_configure_selector_button(GtkWidget* btn, const BListFilterDescription* filter, int index, gboolean prefer_icon, int unread)
+static void blistfilter_configure_selector_button(GtkWidget* btn, const BListFilterDescription* filter, int index, gboolean prefer_icon)
 {
 	char* namebuffer;
 	char* hintbuffer;
@@ -379,7 +432,7 @@ static void blistfilter_configure_selector_button(GtkWidget* btn, const BListFil
 	variant = 0;
 	if (filter->name && filter->name[0]) variant |= 0x01;
 	if (filter->icon_path && filter->icon_path[0]) variant |= 0x02;
-	if (unread > 0) variant |= 0x04;
+	if (filter->matching_unreads > 0) variant |= 0x04;
 	switch (variant)
 	{
 		case 0x00: //no name, no icon, no unreads
@@ -414,31 +467,31 @@ static void blistfilter_configure_selector_button(GtkWidget* btn, const BListFil
 		}; break;
 		case 0x04: //no name, no icon, has unreads
 		{
-			snprintf(namebuffer, len, "[%d] Filter #%d", unread, index);
-			snprintf(hintbuffer, len, "[%d] Filter #%d", unread, index);
+			snprintf(namebuffer, len, "[%d] Filter #%d", filter->matching_unreads, index);
+			snprintf(hintbuffer, len, "[%d] Filter #%d", filter->matching_unreads, index);
 		}; break;
 		case 0x05: //name, no icon, has unreads
 		{
-			snprintf(namebuffer, len, "[%d] %s", unread, filter->name);
-			snprintf(hintbuffer, len, "[%d] %s", unread, filter->name);
+			snprintf(namebuffer, len, "[%d] %s", filter->matching_unreads, filter->name);
+			snprintf(hintbuffer, len, "[%d] %s", filter->matching_unreads, filter->name);
 		}; break;
 		case 0x06: //no name, icon, has unreads
 		{
 			if (prefer_icon)
-				snprintf(namebuffer, len, "[%d]", unread);
+				snprintf(namebuffer, len, "[%d]", filter->matching_unreads);
 			else
-				snprintf(namebuffer, len, "[%d] Filter #%d", unread, index);
-			snprintf(hintbuffer, len, "[%d] Filter #%d", unread, index);
+				snprintf(namebuffer, len, "[%d] Filter #%d", filter->matching_unreads, index);
+			snprintf(hintbuffer, len, "[%d] Filter #%d", filter->matching_unreads, index);
 			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
 			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
 		}; break;
 		case 0x07: //name, icon, has unreads
 		{
 			if (prefer_icon)
-				snprintf(namebuffer, len, "[%d]", unread);
+				snprintf(namebuffer, len, "[%d]", filter->matching_unreads);
 			else
-				snprintf(namebuffer, len, "[%d] %s", unread, filter->name);
-			snprintf(hintbuffer, len, "[%d] %s", unread, filter->name);
+				snprintf(namebuffer, len, "[%d] %s", filter->matching_unreads, filter->name);
+			snprintf(hintbuffer, len, "[%d] %s", filter->matching_unreads, filter->name);
 			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
 			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
 		}; break;
@@ -448,6 +501,24 @@ static void blistfilter_configure_selector_button(GtkWidget* btn, const BListFil
 	g_free(namebuffer);
 	g_free(hintbuffer);
 } 
+//Updates all buttons' icons/labels according to filter settigns and unread counts
+static void blistfilter_update_all_buttons()
+{
+	gboolean prefer_icon, always_show_titles;
+	int selector_style;
+	int filter_id = 0;	
+	GList* btn = blistfilter_gui.buttons;
+	
+	selector_style = purple_prefs_get_int(PLUGIN_PREF_SELECTOR_STYLE);
+	always_show_titles = purple_prefs_get_bool(PLUGIN_PREF_FORCE_TITLES);
+	prefer_icon = ((selector_style == FST_HORIZONTAL_TOP) || (selector_style == FST_HORIZONTAL_BOTTOM)) && !always_show_titles; 
+	for (GList* item = blistfilter_filters; item != NULL; item = item->next)
+	{
+		blistfilter_configure_selector_button(GTK_WIDGET(btn->data), (BListFilterDescription*)item->data, filter_id, prefer_icon);
+		btn = btn->next;
+		filter_id++;
+	}
+}
 
 //Creates filter selector panel in vertical orientation
 static void blistfilter_make_vertical_selector_gui()
@@ -455,7 +526,6 @@ static void blistfilter_make_vertical_selector_gui()
 	int spacing;
 	int selected_index;
 	int filter_id;
-	BListFilterDescription* filter;
 	GtkRadioButton* btn;
 	GSList* group;
 	
@@ -469,10 +539,8 @@ static void blistfilter_make_vertical_selector_gui()
 	group = NULL;
 	for (GList* item = blistfilter_filters; item != NULL; item = item->next)
 	{
-		filter = (BListFilterDescription*) item->data;
 		btn = GTK_RADIO_BUTTON(gtk_radio_button_new(group));
 		group = gtk_radio_button_get_group(btn);
-		blistfilter_configure_selector_button(GTK_WIDGET(btn), filter, filter_id, FALSE, 0);
 		gtk_button_set_focus_on_click(GTK_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), selected_index == filter_id);
@@ -480,6 +548,7 @@ static void blistfilter_make_vertical_selector_gui()
 		blistfilter_gui.buttons = g_list_append(blistfilter_gui.buttons, g_object_ref(btn));
 		filter_id++;
 	}
+	blistfilter_update_all_buttons();
 	filter_id = 0;
 	for (GList* item = blistfilter_gui.buttons; item != NULL; item = item->next)
 	{
@@ -493,12 +562,9 @@ static void blistfilter_make_horizontal_selector_gui()
 	int spacing;
 	int selected_index;
 	int filter_id;
-	BListFilterDescription* filter;
 	GtkRadioButton* btn;
 	GSList* group;
-	gboolean always_show_titles;
 	
-	always_show_titles = purple_prefs_get_bool(PLUGIN_PREF_FORCE_TITLES);
 	selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
 	spacing = purple_prefs_get_int(PLUGIN_PREF_BTN_SPACING);
 	blistfilter_gui.box = g_object_ref(gtk_hbox_new(TRUE, spacing));
@@ -509,10 +575,8 @@ static void blistfilter_make_horizontal_selector_gui()
 	group = NULL;
 	for (GList* item = blistfilter_filters; item != NULL; item = item->next)
 	{
-		filter = (BListFilterDescription*) item->data;
 		btn = GTK_RADIO_BUTTON(gtk_radio_button_new(group));
 		group = gtk_radio_button_get_group(btn);
-		blistfilter_configure_selector_button(GTK_WIDGET(btn), filter, filter_id, !always_show_titles, 0);
 		gtk_button_set_focus_on_click(GTK_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), selected_index == filter_id);
@@ -520,6 +584,7 @@ static void blistfilter_make_horizontal_selector_gui()
 		blistfilter_gui.buttons = g_list_append(blistfilter_gui.buttons, g_object_ref(btn));
 		filter_id++;
 	}
+	blistfilter_update_all_buttons();
 	filter_id = 0;
 	for (GList* item = blistfilter_gui.buttons; item != NULL; item = item->next)
 	{
@@ -548,6 +613,7 @@ static void blistfilter_make_filter_selector_gui()
 		selector_style = FST_VERTICAL_TOP;
 		purple_prefs_set_int(PLUGIN_PREF_SELECTOR_STYLE, selector_style);
 	}
+	blistfilter_update_all_unread_counters();
 	switch (selector_style)
 	{
 		case FST_VERTICAL_TOP:
@@ -615,6 +681,16 @@ static void blistfilter_active_filter_changed_cb(const char* name, PurplePrefTyp
 static void blistfilter_gui_setting_changed_cb(const char* name, PurplePrefType type, gconstpointer val, gpointer data)
 {
 	blistfilter_make_filter_selector_gui();
+}
+
+//Triggers when a conversation is updated.
+static void blistfilter_convo_has_updated(PurpleConversation* conv, PurpleConvUpdateType type)
+{
+	if (type == PURPLE_CONV_UPDATE_UNSEEN)
+	{
+		blistfilter_update_all_unread_counters();
+		blistfilter_update_all_buttons();
+	}
 }
 
 //====================== Editor stuff ======================
@@ -1055,6 +1131,8 @@ static gboolean plugin_load (PurplePlugin * plugin)
 	//when buddy list is created, we will add our GUI. But if we are enabled late, and it's been created already...
 	blistfilter_make_filter_selector_gui(); //try and create it immediately. Worst case, the call will silently fail.
 	purple_signal_connect(pidgin_blist_get_handle(), "gtkblist-created", plugin, PURPLE_CALLBACK(blistfilter_make_filter_selector_gui), NULL);
+	//wehn a conversation gains/loses "has unread messages" status, we need to update our GUI
+	purple_signal_connect(purple_conversations_get_handle(), "conversation-updated", plugin, PURPLE_CALLBACK(blistfilter_convo_has_updated), NULL); 
 	//Done.
 	//purple_debug_info(PLUGIN_ID, "Plugin loaded.\n");
 	return TRUE;
