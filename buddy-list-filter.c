@@ -64,6 +64,13 @@
 #define PLUGIN_VERSION "0.1"
 #define PLUGIN_PREF_ROOT "/plugins/gtk/" PLUGIN_ID
 #define PLUGIN_PREF_ACTIVE_FILTER PLUGIN_PREF_ROOT "/selected_filter"
+#define PLUGIN_PREF_BTN_SPACING PLUGIN_PREF_ROOT "/buttons_spacing"
+#define PLUGIN_PREF_SELECTOR_STYLE PLUGIN_PREF_ROOT "/selector_style"
+#define PLUGIN_PREF_FORCE_TITLES PLUGIN_PREF_ROOT "/force_titles"
+#define PLUGIN_PREF_HOMOGENOUS_BTNS PLUGIN_PREF_ROOT "/homogenous_buttons"
+#define PLUGIN_PREF_NTH_NAME PLUGIN_PREF_ROOT "/filters/filter%d/name"
+#define PLUGIN_PREF_NTH_ICON PLUGIN_PREF_ROOT "/filters/filter%d/icon_path"
+#define PLUGIN_PREF_NTH_GROUP PLUGIN_PREF_ROOT "/filters/filter%d/group_patterns"
 #define PLUGIN_PREF_MAXPATH 256
 //Sadly, "\n" is not an option for this. Blame GtkCellRenderer. 
 #define PLUGIN_PATTERN_SEPARATOR "|"
@@ -78,7 +85,7 @@ PurplePlugin* buddylistfilter_plugin = NULL;
 typedef struct
 {
 	GPatternSpec* pattern;
-	gboolean inverted;
+	gboolean is_negative;
 } BListFilter;
 
 typedef struct 
@@ -87,9 +94,9 @@ typedef struct
 	const char* icon_path;
 	GList* group_patterns;
 } BListFilterDescription;
-
+//This global list stores currently active compiled filters
 static GList* blistfilter_filters;
-
+//clears and frees individual BListFilter struct 
 static void free_pattern(gpointer data) 
 { 
 	g_pattern_spec_free(((BListFilter*)data)->pattern);
@@ -120,6 +127,7 @@ static void debug_node(PurpleBlistNode* node)
 }
 //*/
 //Checks if a string is matching any of the specified list of glob-like patterns
+//It MUST match ANY of the positive patterns (if any is present), and it MUST NOT match ANY of the negative patterns.  
 //Empty list will match any string. Empty string will match any list.
 static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
 {
@@ -137,7 +145,7 @@ static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
 	for (GList* i = patterns; i != NULL; i = i->next)
 	{
 		item = (BListFilter*)i->data;
-		if (item->inverted)
+		if (item->is_negative)
 			has_negative_matches = has_negative_matches || g_pattern_match(item->pattern, length, value, reversed);
 		else
 		{
@@ -150,7 +158,6 @@ static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
 	return (!has_any_positives || has_positive_matches) && !has_negative_matches;
 }
 //Checks if a group node matches the specified filter. 
-// - Group has at least one visible child item, either due to filter or because it's a non-standard item.
 static gboolean blistfilter_match_group(PurpleBlistNode* node, BListFilterDescription* filter)
 {
 	const char* group_name;
@@ -216,11 +223,11 @@ static void blistfilter_make_filter_pref(int filter_id)
 	char pref_name_buffer[PLUGIN_PREF_MAXPATH];
 	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d", filter_id);
 	purple_prefs_add_none(pref_name_buffer);
-	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/name", filter_id);
+	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_NAME, filter_id);
 	purple_prefs_add_string(pref_name_buffer, "Everything");
-	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/icon_path", filter_id);
+	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_ICON, filter_id);
 	purple_prefs_add_path(pref_name_buffer, NULL);
-	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/group_patterns", filter_id);
+	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
 	purple_prefs_add_string_list(pref_name_buffer, NULL);
 	purple_debug_misc(PLUGIN_ID, "Created prefs for filter #%d\n", filter_id);
 }
@@ -249,18 +256,18 @@ static GList* blistfilter_prefs_load_patterns(const char* path)
 	for (GList* item = strings; item != NULL; item = item->next)
 	{
 		const gchar* line = (const gchar*)item->data;
-		if (strlen(line) > 0)
+		if (strlen(line) > 0)//we ignore empty filters
 		{
 			filter = g_new0(BListFilter, 1);
-			if (line[0] == '~')
+			if (line[0] == '~') //filters starting with ~ are negative
 			{
 				filter->pattern = g_pattern_spec_new(&line[1]);
-				filter->inverted = TRUE;
+				filter->is_negative = TRUE;
 			}
 			else
 			{
 				filter->pattern = g_pattern_spec_new(line);
-				filter->inverted = FALSE;
+				filter->is_negative = FALSE;
 			}
 			patterns = g_list_append(patterns, filter);
 		}
@@ -276,22 +283,22 @@ static BListFilterDescription* blistfilter_load_filter_pref(int filter_id)
 	BListFilterDescription* filter;
 	char pref_name_buffer[PLUGIN_PREF_MAXPATH];
 	
-	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/name", filter_id);
+	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_NAME, filter_id);
 	if (!purple_prefs_exists(pref_name_buffer))
 		return NULL;
 	filter = g_new0(BListFilterDescription, 1);
 	filter->name = purple_prefs_get_string(pref_name_buffer);
 	if (!filter->name || *(filter->name) == '\0')
 		filter->name = "<unnamed filter>";
-	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/icon_path", filter_id);
+	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_ICON, filter_id);
 	filter->icon_path = purple_prefs_get_path(pref_name_buffer);
-	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/group_patterns", filter_id);
+	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
 	filter->group_patterns = blistfilter_prefs_load_patterns(pref_name_buffer);
 	//purple_debug_misc(PLUGIN_ID, "Loaded a filter:\n");
 	//debug_filter(filter);
 	return filter;
 }
-
+//Frees filter list
 static void blistfilter_free_all_filters()
 {
 	if (blistfilter_filters)
@@ -313,7 +320,7 @@ static void blistfilter_load_all_filters()
 	}
 }
 //====================== GUI structs and funcs ======================
-//Selector types: vertical stack fo buttons, horizontal pane of buttons, drowdown list
+//Selector types: vertical stack of buttons or horizontal pane of buttons
 typedef enum 
 { 
 	FST_VERTICAL_TOP,
@@ -322,15 +329,14 @@ typedef enum
 	FST_HORIZONTAL_BOTTOM, 
 	FST_INVALID
 } FilterSelectorStyle;
-
-typedef struct
+//stores handles of important filter selector GUI elements
+struct
 {
 	GtkWidget* box;
 	GList* buttons;
-} FilterSelectorGui;
+} blistfilter_gui;
 
-FilterSelectorGui* blistfilter_gui;
-
+//Callback triggered when user selects a filter using GUI 
 static void blistfilter_button_cb(GtkButton* btn, gpointer user_data)
 {
 	int new_filter_id;
@@ -349,17 +355,101 @@ static void blistfilter_button_cb(GtkButton* btn, gpointer user_data)
 		purple_prefs_set_int(PLUGIN_PREF_ACTIVE_FILTER, 0);
 	}
 }
-
+//Destroys created filter selector panel. Useful when it's being remade, or when plugin is unloaded.
 static void blistfilter_destroy_filter_selector_gui()
 {
-	g_list_free_full(g_steal_pointer(&blistfilter_gui->buttons), g_object_unref);
-	if (blistfilter_gui->box)
+	g_list_free_full(g_steal_pointer(&blistfilter_gui.buttons), g_object_unref);
+	if (blistfilter_gui.box)
 	{
-		g_object_unref(blistfilter_gui->box);
-		gtk_widget_destroy(g_steal_pointer(&blistfilter_gui->box));
+		g_object_unref(blistfilter_gui.box);
+		gtk_widget_destroy(g_steal_pointer(&blistfilter_gui.box));
 	}
 }
+//configures label and icon of a filter button, depending on filter settings and unread messages count
+static void blistfilter_configure_selector_button(GtkWidget* btn, const BListFilterDescription* filter, int index, gboolean prefer_icon, int unread)
+{
+	char* namebuffer;
+	char* hintbuffer;
+	size_t len;
+	int variant;
+	
+	len = filter->name ? strlen(filter->name)+32 : 32;
+	namebuffer = g_new0(char, len);
+	hintbuffer = g_new0(char, len);
+	variant = 0;
+	if (filter->name && filter->name[0]) variant |= 0x01;
+	if (filter->icon_path && filter->icon_path[0]) variant |= 0x02;
+	if (unread > 0) variant |= 0x04;
+	switch (variant)
+	{
+		case 0x00: //no name, no icon, no unreads
+		{
+			snprintf(namebuffer, len, "Filter #%d", index);
+			snprintf(hintbuffer, len, "Filter #%d", index);
+		}; break;
+		case 0x01: //name, no icon, no unreads
+		{
+			snprintf(namebuffer, len, "%s", filter->name);
+			snprintf(hintbuffer, len, "%s", filter->name);
+		}; break;
+		case 0x02: //no name, icon, no unreads
+		{
+			if (prefer_icon)
+				namebuffer[0] = 0;
+			else
+				snprintf(namebuffer, len, "Filter #%d", index);
+			snprintf(hintbuffer, len, "Filter #%d", index);
+			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
+			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
+		}; break;
+		case 0x03: //name, icon, no unreads
+		{
+			if (prefer_icon)
+				namebuffer[0] = 0;
+			else
+				snprintf(namebuffer, len, "%s", filter->name);
+			snprintf(hintbuffer, len, "%s", filter->name);
+			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
+			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
+		}; break;
+		case 0x04: //no name, no icon, has unreads
+		{
+			snprintf(namebuffer, len, "[%d] Filter #%d", unread, index);
+			snprintf(hintbuffer, len, "[%d] Filter #%d", unread, index);
+		}; break;
+		case 0x05: //name, no icon, has unreads
+		{
+			snprintf(namebuffer, len, "[%d] %s", unread, filter->name);
+			snprintf(hintbuffer, len, "[%d] %s", unread, filter->name);
+		}; break;
+		case 0x06: //no name, icon, has unreads
+		{
+			if (prefer_icon)
+				snprintf(namebuffer, len, "[%d]", unread);
+			else
+				snprintf(namebuffer, len, "[%d] Filter #%d", unread, index);
+			snprintf(hintbuffer, len, "[%d] Filter #%d", unread, index);
+			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
+			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
+		}; break;
+		case 0x07: //name, icon, has unreads
+		{
+			if (prefer_icon)
+				snprintf(namebuffer, len, "[%d]", unread);
+			else
+				snprintf(namebuffer, len, "[%d] %s", unread, filter->name);
+			snprintf(hintbuffer, len, "[%d] %s", unread, filter->name);
+			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
+			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
+		}; break;
+	}
+	gtk_button_set_label(GTK_BUTTON(btn), namebuffer);
+	gtk_widget_set_tooltip_text(GTK_WIDGET(btn), hintbuffer);
+	g_free(namebuffer);
+	g_free(hintbuffer);
+} 
 
+//Creates filter selector panel in vertical orientation
 static void blistfilter_make_vertical_selector_gui()
 {
 	int spacing;
@@ -370,10 +460,10 @@ static void blistfilter_make_vertical_selector_gui()
 	GSList* group;
 	
 	selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
-	spacing = purple_prefs_get_int(PLUGIN_PREF_ROOT "/buttons_spacing");
-	blistfilter_gui->box = g_object_ref(gtk_vbox_new(TRUE, spacing));
-	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui->box), purple_prefs_get_bool(PLUGIN_PREF_ROOT "/homogenous_buttons"));
-	gtk_widget_set_name(GTK_WIDGET(blistfilter_gui->box), "blistfilter_gui_box");
+	spacing = purple_prefs_get_int(PLUGIN_PREF_BTN_SPACING);
+	blistfilter_gui.box = g_object_ref(gtk_vbox_new(TRUE, spacing));
+	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui.box), purple_prefs_get_bool(PLUGIN_PREF_HOMOGENOUS_BTNS));
+	gtk_widget_set_name(GTK_WIDGET(blistfilter_gui.box), "blistfilter_gui_box");
 	
 	filter_id = 0;
 	group = NULL;
@@ -382,38 +472,22 @@ static void blistfilter_make_vertical_selector_gui()
 		filter = (BListFilterDescription*) item->data;
 		btn = GTK_RADIO_BUTTON(gtk_radio_button_new(group));
 		group = gtk_radio_button_get_group(btn);
-		if (filter->name && filter->name[0])
-		{
-			gtk_button_set_label(GTK_BUTTON(btn), filter->name);
-			gtk_widget_set_tooltip_text(GTK_WIDGET(btn), filter->name);
-		}
-		else
-		{
-			char buf[32];
-			snprintf(buf, 32, "%d", filter_id+1);
-			gtk_button_set_label(GTK_BUTTON(btn), buf);
-			gtk_widget_set_tooltip_text(GTK_WIDGET(btn), buf);
-		}
+		blistfilter_configure_selector_button(GTK_WIDGET(btn), filter, filter_id, FALSE, 0);
 		gtk_button_set_focus_on_click(GTK_BUTTON(btn), FALSE);
-		if (filter->icon_path && filter->icon_path[0]) //neither NULL nor empty string
-		{
-			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
-			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_LEFT);
-		}
 		gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), selected_index == filter_id);
-		gtk_box_pack_start(GTK_BOX(blistfilter_gui->box), GTK_WIDGET(btn), TRUE, TRUE, 0);
-		blistfilter_gui->buttons = g_list_append(blistfilter_gui->buttons, g_object_ref(btn));
+		gtk_box_pack_start(GTK_BOX(blistfilter_gui.box), GTK_WIDGET(btn), TRUE, TRUE, 0);
+		blistfilter_gui.buttons = g_list_append(blistfilter_gui.buttons, g_object_ref(btn));
 		filter_id++;
 	}
 	filter_id = 0;
-	for (GList* item = blistfilter_gui->buttons; item != NULL; item = item->next)
+	for (GList* item = blistfilter_gui.buttons; item != NULL; item = item->next)
 	{
 		g_signal_connect(G_OBJECT(item->data), "clicked", G_CALLBACK(blistfilter_button_cb), GINT_TO_POINTER(filter_id));
 		filter_id++;
 	}
 }
-
+//Creates filter selector panel in horizontal orientation
 static void blistfilter_make_horizontal_selector_gui()
 {
 	int spacing;
@@ -422,58 +496,38 @@ static void blistfilter_make_horizontal_selector_gui()
 	BListFilterDescription* filter;
 	GtkRadioButton* btn;
 	GSList* group;
-	gboolean always_show_titles, has_icon, has_text;
+	gboolean always_show_titles;
 	
-	always_show_titles = purple_prefs_get_bool(PLUGIN_PREF_ROOT "/force_titles");
+	always_show_titles = purple_prefs_get_bool(PLUGIN_PREF_FORCE_TITLES);
 	selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
-	spacing = purple_prefs_get_int(PLUGIN_PREF_ROOT "/buttons_spacing");
-	blistfilter_gui->box = g_object_ref(gtk_hbox_new(TRUE, spacing));
-	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui->box), purple_prefs_get_bool(PLUGIN_PREF_ROOT "/homogenous_buttons"));
-	gtk_widget_set_name(GTK_WIDGET(blistfilter_gui->box), "blistfilter_gui_box");
+	spacing = purple_prefs_get_int(PLUGIN_PREF_BTN_SPACING);
+	blistfilter_gui.box = g_object_ref(gtk_hbox_new(TRUE, spacing));
+	gtk_box_set_homogeneous(GTK_BOX(blistfilter_gui.box), purple_prefs_get_bool(PLUGIN_PREF_HOMOGENOUS_BTNS));
+	gtk_widget_set_name(GTK_WIDGET(blistfilter_gui.box), "blistfilter_gui_box");
 	
 	filter_id = 0;
 	group = NULL;
 	for (GList* item = blistfilter_filters; item != NULL; item = item->next)
 	{
 		filter = (BListFilterDescription*) item->data;
-		has_text = (filter->name && filter->name[0]);
-		has_icon = (filter->icon_path && filter->icon_path[0]);  
 		btn = GTK_RADIO_BUTTON(gtk_radio_button_new(group));
 		group = gtk_radio_button_get_group(btn);
-		if (has_text)
-			gtk_widget_set_tooltip_text(GTK_WIDGET(btn), filter->name);
+		blistfilter_configure_selector_button(GTK_WIDGET(btn), filter, filter_id, !always_show_titles, 0);
 		gtk_button_set_focus_on_click(GTK_BUTTON(btn), FALSE);
-		if (has_icon)  //neither NULL nor empty string
-		{
-			gtk_button_set_image(GTK_BUTTON(btn), gtk_image_new_from_file(filter->icon_path));
-			gtk_button_set_image_position(GTK_BUTTON(btn), GTK_POS_TOP);
-		}
-		if (!has_icon || always_show_titles)
-		{
-			if (has_text)
-				gtk_button_set_label(GTK_BUTTON(btn), filter->name);
-			else
-			{
-				char buf[32];
-				snprintf(buf, 32, "%d", filter_id+1);
-				gtk_button_set_label(GTK_BUTTON(btn), buf);
-			}
-		}
 		gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(btn), FALSE);
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), selected_index == filter_id);
-		gtk_box_pack_start(GTK_BOX(blistfilter_gui->box), GTK_WIDGET(btn), TRUE, TRUE, 0);
-		blistfilter_gui->buttons = g_list_append(blistfilter_gui->buttons, g_object_ref(btn));
+		gtk_box_pack_start(GTK_BOX(blistfilter_gui.box), GTK_WIDGET(btn), TRUE, TRUE, 0);
+		blistfilter_gui.buttons = g_list_append(blistfilter_gui.buttons, g_object_ref(btn));
 		filter_id++;
 	}
 	filter_id = 0;
-	for (GList* item = blistfilter_gui->buttons; item != NULL; item = item->next)
+	for (GList* item = blistfilter_gui.buttons; item != NULL; item = item->next)
 	{
 		g_signal_connect(G_OBJECT(item->data), "clicked", G_CALLBACK(blistfilter_button_cb), GINT_TO_POINTER(filter_id));
 		filter_id++;
 	}
 }
-
-
+//(Re-)creates filter selector panel and attaches it accordingly
 static void blistfilter_make_filter_selector_gui()
 {
 	FilterSelectorStyle selector_style;
@@ -483,48 +537,46 @@ static void blistfilter_make_filter_selector_gui()
 	//if there is no buddy list window, or if our container already exists, do nothing;
 	if (!gtkblist || !gtkblist->window)
 	{
-		purple_debug_warning(PLUGIN_ID, "blistfilter_make_filter_selector_gui() was called, but buddy list is not there. This shouldn't happen.\n");
+		//nothing to do if blist is not there
 		return;
 	}
 	blistfilter_destroy_filter_selector_gui();
-	selector_style = purple_prefs_get_int(PLUGIN_PREF_ROOT "/selector_style");
+	selector_style = purple_prefs_get_int(PLUGIN_PREF_SELECTOR_STYLE);
 	if (selector_style < 0 || selector_style >= FST_INVALID)
 	{
 		purple_debug_warning(PLUGIN_ID, "Invalid selector style code (%d), changing to default.\n", selector_style);
 		selector_style = FST_VERTICAL_TOP;
-		purple_prefs_set_int(PLUGIN_PREF_ROOT "/selector_style", selector_style);
+		purple_prefs_set_int(PLUGIN_PREF_SELECTOR_STYLE, selector_style);
 	}
 	switch (selector_style)
 	{
 		case FST_VERTICAL_TOP:
 		{ //create vertical list of buttons with icons and text
 			blistfilter_make_vertical_selector_gui();
-			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui->box, FALSE, FALSE, 0);
-			gtk_box_reorder_child(GTK_BOX(gtkblist->vbox), GTK_WIDGET(blistfilter_gui->box), 0);
+			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui.box, FALSE, FALSE, 0);
+			gtk_box_reorder_child(GTK_BOX(gtkblist->vbox), GTK_WIDGET(blistfilter_gui.box), 0);
 		}; break;
 		case FST_VERTICAL_BOTTOM:
 		{ //create vertical list of buttons with icons and text
 			blistfilter_make_vertical_selector_gui();
-			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui->box, FALSE, FALSE, 0);
+			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui.box, FALSE, FALSE, 0);
 		}; break;
 		case FST_HORIZONTAL_TOP: 
 		{ //create horizontal list of buttons with icons only
 			blistfilter_make_horizontal_selector_gui();
-			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui->box, FALSE, FALSE, 0);
-			gtk_box_reorder_child(GTK_BOX(gtkblist->vbox), GTK_WIDGET(blistfilter_gui->box), 0);
+			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui.box, FALSE, FALSE, 0);
+			gtk_box_reorder_child(GTK_BOX(gtkblist->vbox), GTK_WIDGET(blistfilter_gui.box), 0);
 		}; break;
 		case FST_HORIZONTAL_BOTTOM: 
 		{ //create horizontal list of buttons with icons only
 			blistfilter_make_horizontal_selector_gui();
-			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui->box, FALSE, FALSE, 0);
+			gtk_box_pack_start(GTK_BOX(gtkblist->vbox), blistfilter_gui.box, FALSE, FALSE, 0);
 		}; break;
 		default: {
 			purple_debug_error(PLUGIN_ID, "Wait, how did THAT happen? Selector style code is %d despite having been normalized!\n", selector_style);
-			blistfilter_gui->box = NULL;
-			return;
 		}; break;
 	}
-	gtk_widget_show_all(blistfilter_gui->box);
+	gtk_widget_show_all(blistfilter_gui.box);
 }
 
 //====================== Events and callbacks ======================
@@ -542,8 +594,21 @@ static void blistfilter_active_filter_changed_cb(const char* name, PurplePrefTyp
 	}
 	selected_index = GPOINTER_TO_INT(val);
 	filter = (BListFilterDescription*)g_list_nth_data(blistfilter_filters, selected_index);
-	purple_debug_info(PLUGIN_ID, "Filter #%d: %s is now selected.\n", selected_index, filter->name);
-	blistfilter_update_entire_blist(filter);
+	if (filter != NULL)
+	{
+		purple_debug_info(PLUGIN_ID, "Filter #%d: %s is now selected.\n", selected_index, filter->name);
+		blistfilter_update_entire_blist(filter);
+	}
+	else if (selected_index != 0)
+	{
+		purple_debug_error(PLUGIN_ID, "Filter #%d has been selected, but it is not present. Resetting it to 0.\n", selected_index);
+		purple_prefs_set_int(PLUGIN_PREF_ACTIVE_FILTER, 0);
+	}
+	else
+	{
+		purple_debug_error(PLUGIN_ID, "Filter #0 has been selected, but it is not present. This REALLY shouldn't have happened, so we just show everything.\n");
+		blistfilter_update_entire_blist(NULL);
+	}
 }
 
 //Triggers whenever a GUI setting changes. Updates GUI immediately.
@@ -553,12 +618,15 @@ static void blistfilter_gui_setting_changed_cb(const char* name, PurplePrefType 
 }
 
 //====================== Editor stuff ======================
+//global storage for editor GUI objects used by the callbacks.
+//if C had classes, it'd be a class instance.
 static struct {
 	GtkWidget* dialog;
 	GtkTreeView* view;
 	GtkListStore* model;
 } blistfilter_editor_gui;
-
+//Creates a GtkListStore based on filter data stored in prefs. 
+//This store will be used in filter editor dialog, and will be exported back to prefs if user saves the changes.  
 static GtkListStore* blistfilter_load_model_from_prefs()
 {
 	GtkListStore* model;
@@ -576,22 +644,24 @@ static GtkListStore* blistfilter_load_model_from_prefs()
 	filter_id = 0;
 	do
 	{
-		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/name", filter_id);
-		if (!purple_prefs_exists(pref_name)) break;
+		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_NAME, filter_id);
+		if (!purple_prefs_exists(pref_name)) break; //No name node? we must've loaded everything
 		filter_name = purple_prefs_get_string(pref_name);
-		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/icon_path", filter_id);
+		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_ICON, filter_id);
 		filter_icon = purple_prefs_get_path(pref_name);
-		
-		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/group_patterns", filter_id);
+		//We have to combine a string list into a single string for ease of editing.
+		//A specified separator character is used for that purpose
+		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
 		filter_pattern_bits = purple_prefs_get_string_list(pref_name);
 		bits_length = g_list_length(filter_pattern_bits);
-		bits = g_new0(gchar*, bits_length+1); //the array must be NULL-terminated 
+		bits = g_new0(gchar*, bits_length+1); //the array must be NULL-terminated, so we add an extra element and leave it as NULL 
+		//GList of gchar* --> gchar**		
 		bit_index = 0;
 		for (GList* i = filter_pattern_bits; i != NULL; i = i->next)
 			bits[bit_index++] = (gchar*)i->data;
-		filter_patterns = g_strjoinv(PLUGIN_PATTERN_SEPARATOR, bits);
-		g_free(bits);
-		g_list_free_full(g_steal_pointer(&filter_pattern_bits), g_free);
+		filter_patterns = g_strjoinv(PLUGIN_PATTERN_SEPARATOR, bits); //got our single string
+		g_free(bits); //clear the array, but not the items - those are owned by the GList
+		g_list_free_full(g_steal_pointer(&filter_pattern_bits), g_free); //clear the GList
 		gtk_list_store_insert_with_values(
 			model, 
 			&iter,
@@ -605,7 +675,7 @@ static GtkListStore* blistfilter_load_model_from_prefs()
 	} while (TRUE);
 	return model;
 }
-
+//Export a GtkListStore to filter prefs
 static void blistfilter_save_model_to_prefs(GtkListStore* model)
 {
 	GtkTreeIter iter;
@@ -623,23 +693,25 @@ static void blistfilter_save_model_to_prefs(GtkListStore* model)
 		purple_debug_error(PLUGIN_ID, "Somehow, list store for filters is NULL. How did *that* even happen?\n");
 		return;
 	}
- 
+	 
 	if (!gtk_tree_model_get_iter_first(GTK_TREE_MODEL(model), &iter))
 	{
 		purple_debug_error(PLUGIN_ID, "Somehow, list store for filters is empty. This should not have happened, as we prevent deleting the last filter.\n");
 		return;
 	}
+	//after the save, selected filter might end up out of bounds for the new array
 	selected_id = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
 	filter_id = 0;
+	//we overwrite first N filters in the prefs with new values 
 	do
 	{
 		gtk_tree_model_get(GTK_TREE_MODEL(model), &iter, 0, &name_value, 1, &icon_value, 2, &pattern_value, -1);
 		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d", filter_id);
 		if (!purple_prefs_exists(pref_name)) //create filter branch if necessary - just overwrite if not
 			purple_prefs_add_none(pref_name);
-		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/name", filter_id);
+		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_NAME, filter_id);
 		purple_prefs_set_string(pref_name, name_value);
-		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/icon_path", filter_id);
+		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_ICON, filter_id);
 		purple_prefs_set_string(pref_name, icon_value);
 		
 		bits = g_strsplit(pattern_value, PLUGIN_PATTERN_SEPARATOR, 0);
@@ -648,7 +720,7 @@ static void blistfilter_save_model_to_prefs(GtkListStore* model)
 		{
 			filter_pattern_bits = g_list_append(filter_pattern_bits, bits[i]);
 		}
-		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d/group_patterns", filter_id);
+		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
 		purple_prefs_set_string_list(pref_name, filter_pattern_bits);
 		g_list_free(filter_pattern_bits);
 		g_strfreev(bits);
@@ -659,67 +731,68 @@ static void blistfilter_save_model_to_prefs(GtkListStore* model)
 		filter_id++;
 	}
 	while (gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter));
-	filter_count = filter_id;
-	//removing any extraneous filters left
+	filter_count = filter_id; //now we remember how many filters we have 
+	//then we remove any extraneous filters left in the prefs
 	do
 	{
 		snprintf(pref_name, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d", filter_id);
 		if (purple_prefs_exists(pref_name))
 			purple_prefs_remove(pref_name);
 		else
-			break;
+			break; //no extra filters left, we can stop
 		filter_id++;
 	}
 	while (TRUE);
-	if (selected_id >= filter_count)
+	//ensure selected filter index is not out of bounds
+	if (selected_id >= filter_count) 
 		purple_prefs_set_int(PLUGIN_PREF_ACTIVE_FILTER, filter_count-1);
 }
-
+//destroys stored references to editor GUI objects
 static void blistfilter_destroy_editor()
 {
 	g_clear_object(&blistfilter_editor_gui.dialog);
 	g_clear_object(&blistfilter_editor_gui.view);
 	g_clear_object(&blistfilter_editor_gui.model);
 }
-
+//Callback triggered when user chooses to save the changes in filter editor
 static void blistfilter_save_filters_dlg(GtkWidget *w, GtkWidget *window)
 {
 	int selected_index;
 	BListFilterDescription* filter;
 	
-	if (blistfilter_editor_gui.model)
+	if (blistfilter_editor_gui.model) //should always be true. just in case we *somehow* don't have the model.
 	{
-		blistfilter_destroy_filter_selector_gui();
-		blistfilter_save_model_to_prefs(blistfilter_editor_gui.model);
-		blistfilter_load_all_filters();
-		selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
+		blistfilter_destroy_filter_selector_gui(); //get rid of current set of filter selector buttons 
+		blistfilter_save_model_to_prefs(blistfilter_editor_gui.model); //store model of the filter set to preferences
+		blistfilter_load_all_filters(); //load that filter set from preferences and compile it
+		selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER); //double-check selected filter index is not out of bounds
 		if (selected_index < 0 || selected_index > (int)g_list_length(blistfilter_filters))
 		{
 			selected_index = 0;
 			purple_prefs_set_int(PLUGIN_PREF_ACTIVE_FILTER, selected_index);
 		}
+		blistfilter_make_filter_selector_gui(); //remake filter selector buttons with new filter set and new selected index 
 		filter = (BListFilterDescription*)g_list_nth_data(blistfilter_filters, selected_index);
-		blistfilter_make_filter_selector_gui();
-		blistfilter_update_entire_blist(filter);
+		blistfilter_update_entire_blist(filter); //ensure currently selected filter is applied to the buddy list
 	}
-	blistfilter_destroy_editor();
-	gtk_widget_destroy(window);
+	blistfilter_destroy_editor(); //get rid of our stored references to filter editor GUI objects
+	gtk_widget_destroy(window); //the window itself can go, too
 }
-
+//Callback triggered when user chooses to discard changes in filter editor 
 static void blistfilter_close_filters_dlg(GtkWidget *w, GtkWidget *window)
 {
-	blistfilter_destroy_editor();
-	gtk_widget_destroy(window);
+	blistfilter_destroy_editor(); //get rid of our stored references to filter editor GUI objects
+	gtk_widget_destroy(window); //the window itself can go, too
 }
-
+//Callback triggered when user wants to add a new filter
 static void blistfilter_add_new_filter_cb(GtkWidget *w, GtkWidget *window)
 {
 	GtkTreeIter iter;
 	GtkTreeSelection* selection;
 	
-	if (!blistfilter_editor_gui.model) return;
+	if (!blistfilter_editor_gui.model) return; //should never fire, but...
 	selection = gtk_tree_view_get_selection(blistfilter_editor_gui.view);
-	gtk_list_store_insert_with_values(
+	gtk_list_store_insert_with_values( //add new filter to the end of the model
 		blistfilter_editor_gui.model, 
 		&iter,
 		-1, //end of the list
@@ -727,9 +800,9 @@ static void blistfilter_add_new_filter_cb(GtkWidget *w, GtkWidget *window)
 		1, "",
 		2, "",
 		-1);
-	gtk_tree_selection_select_iter(selection, &iter);
+	gtk_tree_selection_select_iter(selection, &iter); //make sure it's selected
 }
-
+//Callback triggered when user wants to delete a filter
 static void blistfilter_delete_filter_cb(GtkWidget *w, GtkWidget *window)
 {
 	int length;
@@ -737,29 +810,32 @@ static void blistfilter_delete_filter_cb(GtkWidget *w, GtkWidget *window)
 	GtkTreeIter iter, new_selection_iter;
 	gboolean has_new_selection;
 
-	if (!blistfilter_editor_gui.model) return;
+	if (!blistfilter_editor_gui.model) return;//should never fire, but...
+	//lets make sure we aren't deleting the last filter
 	length = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(blistfilter_editor_gui.model), NULL);
 	if (length < 2)
 	{
 		purple_notify_error(buddylistfilter_plugin, "Last filter", "Last filter", "Can't delete the last filter.");
 		return;
 	}
+	//find out which filter is selected
 	selection = gtk_tree_view_get_selection(blistfilter_editor_gui.view);
 	if (!gtk_tree_selection_get_selected(selection, (GtkTreeModel**)(&blistfilter_editor_gui.model), &iter))
 	{
 		purple_notify_error(buddylistfilter_plugin, "No selection", "No selection", "Nothing is selected.");
 		return;
 	}
+	//it's preferrable if we have selection after deletion as well, so let's determine which one it will be
 	new_selection_iter = iter;
 	if (gtk_tree_model_iter_next(GTK_TREE_MODEL(blistfilter_editor_gui.model), &new_selection_iter))
-		has_new_selection = TRUE;
-	else
+		has_new_selection = TRUE; //okay, so we have an element after the one we deleted.
+	else	//we don't, so we try and pick the first one
 		has_new_selection = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(blistfilter_editor_gui.model), &new_selection_iter);
-	gtk_list_store_remove(blistfilter_editor_gui.model, &iter);
-	if (has_new_selection)
+	gtk_list_store_remove(blistfilter_editor_gui.model, &iter); //anyway, drop the element
+	if (has_new_selection) //if we somehow couldn't find the selection, it will be up to user. Othwerwise, select.
 		gtk_tree_selection_select_iter(selection, &new_selection_iter);
 }
-
+//Callback triggered when user wants to move a filter up in the list
 static void blistfilter_move_filter_up_cb(GtkWidget *w, GtkWidget *window)
 {
 	GtkTreeSelection* selection;
@@ -767,13 +843,15 @@ static void blistfilter_move_filter_up_cb(GtkWidget *w, GtkWidget *window)
 	GtkTreePath* path;
 
 	if (!blistfilter_editor_gui.model) return;
+	//figuring out which element is selected
 	selection = gtk_tree_view_get_selection(blistfilter_editor_gui.view);
 	if (!gtk_tree_selection_get_selected(selection, (GtkTreeModel**)(&blistfilter_editor_gui.model), &iter_selected))
 	{
 		purple_notify_error(buddylistfilter_plugin, "No selection", "No selection", "Nothing is selected.");
 		return;
 	}
-	//GTK 2.0 does not have gtk_tree_model_iter_previous() what the HELL 
+	//GTK 2.0 does not have gtk_tree_model_iter_previous() what the HELL >_<
+	//stole the implementation from GTK 3+ 
 	path = gtk_tree_model_get_path(GTK_TREE_MODEL(blistfilter_editor_gui.model), &iter_selected);
 	if (gtk_tree_path_prev(path) && gtk_tree_model_get_iter(GTK_TREE_MODEL(blistfilter_editor_gui.model), &iter_before, path))
 	{
@@ -782,13 +860,14 @@ static void blistfilter_move_filter_up_cb(GtkWidget *w, GtkWidget *window)
 	}
 	gtk_tree_path_free(path);
 }
-
+//Callback triggered when user wants to move a filter down in the list
 static void blistfilter_move_filter_down_cb(GtkWidget *w, GtkWidget *window)
 {
 	GtkTreeSelection* selection;
 	GtkTreeIter iter_selected, iter_after;
 
 	if (!blistfilter_editor_gui.model) return;
+	//figuring out which element is selected
 	selection = gtk_tree_view_get_selection(blistfilter_editor_gui.view);
 	if (!gtk_tree_selection_get_selected(selection, (GtkTreeModel**)(&blistfilter_editor_gui.model), &iter_selected))
 	{
@@ -803,16 +882,17 @@ static void blistfilter_move_filter_down_cb(GtkWidget *w, GtkWidget *window)
 	}
 }
 
-//reacts to cell being edited.
+//Callback reacts to a filter view cell being edited. We have to store the new value in the model ourselves.
 static void blistfilter_filter_renderer_edited_cb(GtkCellRendererText* cell, gchar* path, char* new_text, gpointer column_idx_as_ptr)
 {
 	GtkTreeIter iter;
-	
+	//figure out which filter has been edited
 	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(blistfilter_editor_gui.model), &iter, path);
+	//store new value in the model
 	gtk_list_store_set(blistfilter_editor_gui.model, &iter, GPOINTER_TO_INT(column_idx_as_ptr), new_text, -1);
 }
 
-//shows filter editor dialog window
+//Callback is triggered when user wants to edit the filters. Creates teh dialog window and shows it.
 static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 {
 	GtkWidget* toptext;
@@ -823,10 +903,12 @@ static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 	GtkTreeViewColumn *column;
 	GtkTreeSelection* selection;
 	
-	blistfilter_destroy_editor();
+	blistfilter_destroy_editor(); //clear out existing dialog window if it was present.
+	//set up dialog window and its container
 	blistfilter_editor_gui.model = g_object_ref(blistfilter_load_model_from_prefs());
 	blistfilter_editor_gui.dialog = GTK_WIDGET(g_object_ref(pidgin_create_dialog("Pidgin Buddylist Filter Editor", 0, "blistfilter-editor", FALSE)));
 	dlgbox = pidgin_dialog_get_vbox_with_properties(GTK_DIALOG(blistfilter_editor_gui.dialog), FALSE, PIDGIN_HIG_BOX_SPACE);
+	//a cheatsheet for the user
 	toptext = gtk_label_new(
 		"Pattern cheatsheet:\n"
 		"    Work - matches a group named 'Work'\n" 
@@ -838,7 +920,7 @@ static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 		"    Empty pattern (no spaces!) matches everything." 
 	);
 	gtk_box_pack_start(GTK_BOX(dlgbox), toptext, FALSE, FALSE, 0);
-
+	//filter list (actually a treeview) 
 	blistfilter_editor_gui.view = GTK_TREE_VIEW(g_object_ref(gtk_tree_view_new_with_model(GTK_TREE_MODEL(blistfilter_editor_gui.model))));
 	selection = gtk_tree_view_get_selection(blistfilter_editor_gui.view);
 	gtk_tree_selection_set_mode(selection, GTK_SELECTION_BROWSE);
@@ -891,13 +973,13 @@ static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 	gtk_box_pack_start(GTK_BOX(commandbox), btn, FALSE, FALSE, 0);
 	
 	gtk_box_pack_start(GTK_BOX(dlgbox), GTK_WIDGET(commandbox), FALSE, FALSE, 0);
-	
+	//add save/close buttons
 	gtk_dialog_set_has_separator(GTK_DIALOG(blistfilter_editor_gui.dialog), TRUE);
 	pidgin_dialog_add_button(GTK_DIALOG(blistfilter_editor_gui.dialog), GTK_STOCK_SAVE, G_CALLBACK(blistfilter_save_filters_dlg), GTK_DIALOG(blistfilter_editor_gui.dialog));
 	pidgin_dialog_add_button(GTK_DIALOG(blistfilter_editor_gui.dialog), GTK_STOCK_CLOSE, G_CALLBACK(blistfilter_close_filters_dlg), GTK_DIALOG(blistfilter_editor_gui.dialog));
+	//show dialog window
 	gtk_widget_show_all(blistfilter_editor_gui.dialog);
 }
-
 
 //====================== Plugins system structs and funcs ======================
 /* we tell libpurple in the PurplePluginInfo struct to call this function to
@@ -906,29 +988,42 @@ static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 
 static GList* plugin_actions (PurplePlugin * plugin, gpointer context)
 {
-	/* some C89 (a.k.a. ANSI C) compilers will warn if any variable declaration
-	 * includes an initilization that calls a function.  To avoid that, we
-	 * generally initialize our variables first with constant values like NULL
-	 * or 0 and assign to them with function calls later */
 	GList *list = NULL;
-	PurplePluginAction *action = NULL;
-
+	PurplePluginAction *action;
+	//show filter editor dialog
 	action = purple_plugin_action_new ("Change filters...", blistfilter_filter_editor_cb);
 	list = g_list_append (list, action);
-
-	/* Once the list is complete, we send it to libpurple. */
+	
 	return list;
 }
 
+//this is called when plugin is loaded, either on Pidgin startup or when enabled in Plugins dialog.
 static gboolean plugin_load (PurplePlugin * plugin)
-{	//this is called when plugin is loaded, either on Pidgin startup or when enabled in Plugins dialog.
+{	
 	int selected_index;
 	BListFilterDescription* filter;
-	
+	//store reference to our plugin for future use
 	buddylistfilter_plugin = plugin;
+	
+	//zero out the global structs
 	blistfilter_filters = NULL;
-	blistfilter_gui = g_new0(FilterSelectorGui, 1);
+	blistfilter_gui.box = NULL;
+	blistfilter_gui.buttons = NULL;
+	blistfilter_editor_gui.dialog = NULL;
+	blistfilter_editor_gui.view = NULL;
+	blistfilter_editor_gui.model = NULL;
 
+	//ensure we have a set of default settings
+	purple_prefs_add_none(PLUGIN_PREF_ROOT);
+	purple_prefs_add_none(PLUGIN_PREF_ROOT "/filters");
+	if (!purple_prefs_exists(PLUGIN_PREF_ROOT "/filters/filter0"))
+		blistfilter_make_filter_pref(0);
+	purple_prefs_add_int(PLUGIN_PREF_ACTIVE_FILTER, 0);
+	purple_prefs_add_int(PLUGIN_PREF_BTN_SPACING, 0);
+	purple_prefs_add_bool(PLUGIN_PREF_SELECTOR_STYLE, FST_VERTICAL_TOP);
+	purple_prefs_add_bool(PLUGIN_PREF_FORCE_TITLES, FALSE);
+	purple_prefs_add_bool(PLUGIN_PREF_HOMOGENOUS_BTNS, FALSE);
+	
 	//loading the currently selected filter
 	blistfilter_load_all_filters();
 	selected_index = purple_prefs_get_int(PLUGIN_PREF_ACTIVE_FILTER);
@@ -936,40 +1031,48 @@ static gboolean plugin_load (PurplePlugin * plugin)
 	{
 		purple_debug_warning(PLUGIN_ID, "Filter #%d was selected, but it does not exist in the prefs. Resetting to 0.\n", selected_index);
 		selected_index = 0;
+		purple_prefs_set_int(PLUGIN_PREF_ACTIVE_FILTER, selected_index);
 	}
 	filter = (BListFilterDescription*)g_list_nth_data(blistfilter_filters, selected_index);
+	//applying the filter to the buddy list
 	blistfilter_update_entire_blist(filter);
-	purple_debug_misc(PLUGIN_ID, "Selected filter #%d: %s.\n", selected_index, filter ? filter->name : "NULL");
+	//purple_debug_misc(PLUGIN_ID, "Selected filter #%d: %s.\n", selected_index, filter ? filter->name : "NULL");
 
 	//connecting to signals
+	//active filter changed - main entry point for filter control
 	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ACTIVE_FILTER, blistfilter_active_filter_changed_cb, NULL);
-
-	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/buttons_spacing", blistfilter_gui_setting_changed_cb, NULL);
-	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/selector_style", blistfilter_gui_setting_changed_cb, NULL);
-	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/force_titles", blistfilter_gui_setting_changed_cb, NULL);
-	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ROOT "/homogenous_buttons", blistfilter_gui_setting_changed_cb, NULL);
-	
+	//gui settings changed - used in conjunction with plugin preference dialog
+	purple_prefs_connect_callback(plugin, PLUGIN_PREF_BTN_SPACING, blistfilter_gui_setting_changed_cb, NULL);
+	purple_prefs_connect_callback(plugin, PLUGIN_PREF_SELECTOR_STYLE, blistfilter_gui_setting_changed_cb, NULL);
+	purple_prefs_connect_callback(plugin, PLUGIN_PREF_FORCE_TITLES, blistfilter_gui_setting_changed_cb, NULL);
+	purple_prefs_connect_callback(plugin, PLUGIN_PREF_HOMOGENOUS_BTNS, blistfilter_gui_setting_changed_cb, NULL);
+	//blist node addition - in case a new node appears, we want it processed. 
 	purple_signal_connect(purple_blist_get_handle(),
 		"blist-node-added",
 		buddylistfilter_plugin,
 		PURPLE_CALLBACK(blistfilter_update_node),
 		NULL);
+	//when buddy list is created, we will add our GUI. But if we are enabled late, and it's been created already...
+	blistfilter_make_filter_selector_gui(); //try and create it immediately. Worst case, the call will silently fail.
 	purple_signal_connect(pidgin_blist_get_handle(), "gtkblist-created", plugin, PURPLE_CALLBACK(blistfilter_make_filter_selector_gui), NULL);
 	//Done.
-	purple_debug_info(PLUGIN_ID, "Plugin loaded.\n");
+	//purple_debug_info(PLUGIN_ID, "Plugin loaded.\n");
 	return TRUE;
 }
-
+//this is called when plugin is unloaded, either on Pidgin shutdown or when disabled in Plugins dialog.
 static gboolean plugin_unload(PurplePlugin* plugin)
 {
+	//show the entire buddy list again
 	blistfilter_update_entire_blist(NULL);
+	//remove filter selector GUI
 	blistfilter_destroy_filter_selector_gui();
+	//clear out compiled filters
 	blistfilter_free_all_filters();
 	//Done.
-	purple_debug_info(PLUGIN_ID, "Plugin unloaded.\n");
+	//purple_debug_info(PLUGIN_ID, "Plugin unloaded.\n");
 	return TRUE;
 }
-
+//This creates plugin settings dialog window
 static PurplePluginPrefFrame* get_plugin_pref_frame(PurplePlugin* plugin)
 {
 	PurplePluginPrefFrame* frame;
@@ -977,7 +1080,7 @@ static PurplePluginPrefFrame* get_plugin_pref_frame(PurplePlugin* plugin)
 	
 	frame = purple_plugin_pref_frame_new();
 	
-	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/selector_style", "Filter selector style");
+	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_SELECTOR_STYLE, "Filter selector style");
 	purple_plugin_pref_set_type(pref, PURPLE_PLUGIN_PREF_CHOICE);
 	purple_plugin_pref_add_choice(pref, "Vertical list (top)", GINT_TO_POINTER(FST_VERTICAL_TOP));
 	purple_plugin_pref_add_choice(pref, "Vertical list (bottom)", GINT_TO_POINTER(FST_VERTICAL_BOTTOM));
@@ -985,13 +1088,13 @@ static PurplePluginPrefFrame* get_plugin_pref_frame(PurplePlugin* plugin)
 	purple_plugin_pref_add_choice(pref, "Horizontal list (bottom)", GINT_TO_POINTER(FST_HORIZONTAL_BOTTOM));
 	purple_plugin_pref_frame_add(frame, pref);
 
-	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/force_titles", "Always show filter names");
+	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_FORCE_TITLES, "Always show filter names");
 	purple_plugin_pref_frame_add(frame, pref);
 
-	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/homogenous_buttons", "Keep all buttons same size");
+	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_HOMOGENOUS_BTNS, "Keep all buttons same size");
 	purple_plugin_pref_frame_add(frame, pref);
 
-	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_ROOT "/buttons_spacing", "Selector button spacing (px)");
+	pref = purple_plugin_pref_new_with_name_and_label(PLUGIN_PREF_BTN_SPACING, "Selector button spacing (px)");
 	purple_plugin_pref_set_bounds(pref, 0, 1280);
 	purple_plugin_pref_frame_add(frame, pref);
 	
@@ -1027,14 +1130,12 @@ static PurplePluginInfo info = {
 	//Long plugin description
 	"This plugin allows user to set up a set of custom views of their buddy list, showing/hiding groups matching specific pattern.\n"
 	"It should allow you to structure your buddy list into 'tabs' instead of having to work with one long flat list.",
-	"Alex Orlov <the.vindicar@gmail.com>", //plugin author
+	"Alex 'Vindicar' Orlov <the.vindicar@gmail.com>", //plugin author
 	"https://github.com/the-vindicar/pidgin-blist-filter",//plugin homepage or github repo
-
 
 	plugin_load, //to be called on plugin startup
 	plugin_unload, //to be called on plugin shutdown
 	NULL, //to be called on plugin emergency shutdown
-
 	NULL, //pointer to a UI specific struct like PidginPluginUiInfo
 	NULL, 
 	&ui_info, //pointer to a UI specific struct like PidginPluginUiInfo - perhaps something to be used in "plugin configuration" dialog?
@@ -1047,19 +1148,10 @@ static PurplePluginInfo info = {
 	NULL
 };
 
-static void
-init_plugin (PurplePlugin * plugin)
+//Triggers when the plugin is probed by Pidgin
+static void init_plugin (PurplePlugin * plugin)
 {
-	purple_debug_info(PLUGIN_ID, "Plugin probed.\n");
-	purple_prefs_add_none(PLUGIN_PREF_ROOT);
-	purple_prefs_add_none(PLUGIN_PREF_ROOT "/filters");
-	if (!purple_prefs_exists(PLUGIN_PREF_ROOT "/filters/filter0"))
-		blistfilter_make_filter_pref(0);
-	purple_prefs_add_int(PLUGIN_PREF_ACTIVE_FILTER, 0);
-	purple_prefs_add_int(PLUGIN_PREF_ROOT "/buttons_spacing", 0);
-	purple_prefs_add_bool(PLUGIN_PREF_ROOT "/selector_style", FST_VERTICAL_TOP);
-	purple_prefs_add_bool(PLUGIN_PREF_ROOT "/force_titles", FALSE);
-	purple_prefs_add_bool(PLUGIN_PREF_ROOT "/homogenous_buttons", FALSE);
+	//purple_debug_info(PLUGIN_ID, "Plugin probed.\n");
 }
 
 PURPLE_INIT_PLUGIN (vindicar_buddylistfilter, init_plugin, info)
