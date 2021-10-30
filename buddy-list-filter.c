@@ -78,6 +78,24 @@
 #define PLUGIN_PATTERN_SEPARATOR "|"
 
 
+#if !PURPLE_VERSION_CHECK(2, 14, 0)
+#define PURPLE_BLIST_NODE_FLAG_INVISIBLE 1 << 1
+#endif
+
+
+#if !GLIB_CHECK_VERSION(2, 44, 0)
+static inline gpointer
+g_steal_pointer (gpointer pp)
+{
+	gpointer *ptr = (gpointer *) pp;
+	gpointer ref;
+	ref = *ptr;
+	*ptr = NULL;
+	return ref;
+}
+#endif /* 2.44.0 */
+
+
 /* we're adding this here and assigning it in plugin_load because we need
  * a valid plugin handle for our call to purple_notify_message() in the
  * plugin_action_test_cb() callback function */
@@ -607,7 +625,7 @@ static void blistfilter_make_filter_selector_gui()
 	}
 	blistfilter_destroy_filter_selector_gui();
 	selector_style = purple_prefs_get_int(PLUGIN_PREF_SELECTOR_STYLE);
-	if (selector_style < 0 || selector_style >= FST_INVALID)
+	if (selector_style >= FST_INVALID)
 	{
 		purple_debug_warning(PLUGIN_ID, "Invalid selector style code (%d), changing to default.\n", selector_style);
 		selector_style = FST_VERTICAL_TOP;
