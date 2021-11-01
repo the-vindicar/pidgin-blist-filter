@@ -1123,7 +1123,7 @@ static gboolean plugin_load (PurplePlugin * plugin)
 		blistfilter_make_filter_pref(0);
 	purple_prefs_add_int(PLUGIN_PREF_ACTIVE_FILTER, 0);
 	purple_prefs_add_int(PLUGIN_PREF_BTN_SPACING, 0);
-	purple_prefs_add_bool(PLUGIN_PREF_SELECTOR_STYLE, FST_VERTICAL_TOP);
+	purple_prefs_add_int(PLUGIN_PREF_SELECTOR_STYLE, FST_VERTICAL_TOP);
 	purple_prefs_add_bool(PLUGIN_PREF_FORCE_TITLES, FALSE);
 	purple_prefs_add_bool(PLUGIN_PREF_HOMOGENOUS_BTNS, FALSE);
 	
