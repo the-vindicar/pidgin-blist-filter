@@ -102,11 +102,13 @@ g_steal_pointer (gpointer pp)
 PurplePlugin* buddylistfilter_plugin = NULL;
 
 //====================== Base structs and funcs ======================
+//This describes pattern type - match all, regular, inverted, miscellaneous
+typedef enum { BLFT_REGULAR, BLFT_INVERTED, BLFT_ALL, BLFT_MISC } BListFilterType;
 //This describes a single pattern against which a string can be matched either positively or negatively
 typedef struct
 {
 	GPatternSpec* pattern;
-	gboolean is_negative;
+	BListFilterType type;
 } BListFilter;
 //This describes a single compiled filter as a named set of patterns.
 //We also track unread messages in contacts that are visible under this filter,
@@ -127,33 +129,10 @@ static void free_pattern(gpointer data)
 	g_free((BListFilter*)data);
 }
 
-/*Output the general stats of the filter into the debug log
-static void debug_filter(BListFilterDescription* filter)
-{
-	if (filter->name) purple_debug_misc(PLUGIN_ID, "\tName: '%s'\n", filter->name); else purple_debug_misc(PLUGIN_ID, "\tName: NULL\n");
-	if (filter->icon_path) purple_debug_misc(PLUGIN_ID, "\tIcon: '%s'\n", filter->icon_path); else purple_debug_misc(PLUGIN_ID, "\tIcon: NULL\n");
-	purple_debug_misc(PLUGIN_ID, "\tGroup patterns: %d\n", g_list_length(filter->group_patterns));
-}
-//*/
-/*Outputs the visible name of a node into the debug log
-static void debug_node(PurpleBlistNode* node)
-{
-	const char* vis;
-	vis = PURPLE_BLIST_NODE_IS_VISIBLE(node) ? "V" : "H";
-	switch (purple_blist_node_get_type(node))
-	{
-		case PURPLE_BLIST_GROUP_NODE:	purple_debug_misc(PLUGIN_ID, "[%s] [GROUP] %s\n", vis, purple_group_get_name(PURPLE_GROUP(node))); break;
-		case PURPLE_BLIST_CONTACT_NODE:	purple_debug_misc(PLUGIN_ID, "[%s] [CNTCT] %s\n", vis, purple_contact_get_alias(PURPLE_CONTACT(node))); break;
-		case PURPLE_BLIST_CHAT_NODE:	purple_debug_misc(PLUGIN_ID, "[%s] [CHAT ] %s\n", vis, purple_chat_get_name(PURPLE_CHAT(node))); break;
-		case PURPLE_BLIST_BUDDY_NODE:	purple_debug_misc(PLUGIN_ID, "[%s] [BUDDY] %s\n", vis, purple_buddy_get_alias(PURPLE_BUDDY(node))); break;
-		default: 			purple_debug_misc(PLUGIN_ID, "[%s] [OTHER] %s\n", vis, "???"); break;
-	}
-}
-//*/
 //Checks if a string is matching any of the specified list of glob-like patterns
 //It MUST match ANY of the positive patterns (if any is present), and it MUST NOT match ANY of the negative patterns.  
 //Empty list will match any string. Empty string will match any list.
-static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
+static gboolean blistfilter_is_matching_list(const char* value, GList* patterns, gboolean regular_only)
 {
 	gboolean has_positive_matches, has_negative_matches, has_any_positives;
 	guint length;
@@ -169,12 +148,43 @@ static gboolean blistfilter_is_matching_list(const char* value, GList* patterns)
 	for (GList* i = patterns; i != NULL; i = i->next)
 	{
 		item = (BListFilter*)i->data;
-		if (item->is_negative)
-			has_negative_matches = has_negative_matches || g_pattern_match(item->pattern, length, value, reversed);
-		else
+		switch (item->type)
 		{
-			has_positive_matches = has_positive_matches || g_pattern_match(item->pattern, length, value, reversed);
-			has_any_positives = TRUE;
+			case BLFT_REGULAR:
+			{
+				has_positive_matches = has_positive_matches || g_pattern_match(item->pattern, length, value, reversed);
+				has_any_positives = TRUE;
+			}; break;
+			case BLFT_INVERTED:
+			{
+				has_negative_matches = has_negative_matches || g_pattern_match(item->pattern, length, value, reversed);
+			}; break;
+			case BLFT_ALL:
+			{
+				if (!regular_only)
+				{
+					has_positive_matches = TRUE;
+					has_any_positives = TRUE;
+				}
+			}; break;
+			case BLFT_MISC:
+			{
+				if (!regular_only) //recursion stop condition
+				{	//if any other non-all filter matches this group, we don't want to see it
+					for (GList* filter = blistfilter_filters; !has_negative_matches && (filter != NULL); filter = filter->next)
+					{
+						BListFilterDescription* filterdesc = (BListFilterDescription*)(filter->data);
+						gboolean has_regular_filters = FALSE;
+						for (GList* flt = filterdesc->group_patterns; !has_regular_filters && (flt != NULL); flt = flt->next)
+						{
+							BListFilter* subitem = (BListFilter*)flt->data;
+							has_regular_filters = has_regular_filters || (subitem->type == BLFT_REGULAR) || (subitem->type == BLFT_INVERTED);
+						}
+						if (has_regular_filters)
+							has_negative_matches = has_negative_matches || blistfilter_is_matching_list(value, filterdesc->group_patterns, TRUE);
+					}
+				}
+			}
 		}
 	}
 	g_free(reversed);
@@ -194,7 +204,7 @@ static gboolean blistfilter_match_group(PurpleBlistNode* node, BListFilterDescri
 	if (!filter) 
 		return TRUE;
 	group_name = purple_group_get_name(PURPLE_GROUP(node));
-	return blistfilter_is_matching_list(group_name, filter->group_patterns);
+	return blistfilter_is_matching_list(group_name, filter->group_patterns, FALSE);
 }
 
 //Sets node visiblity
@@ -305,7 +315,6 @@ static void blistfilter_make_filter_pref(int filter_id)
 	purple_prefs_add_path(pref_name_buffer, NULL);
 	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
 	purple_prefs_add_string_list(pref_name_buffer, NULL);
-	purple_debug_misc(PLUGIN_ID, "Created prefs for filter #%d\n", filter_id);
 }
 
 //Clears a BListFilterDescription structure so it can be refilled or disposed of
@@ -328,24 +337,37 @@ static GList* blistfilter_prefs_load_patterns(const char* path)
 	GList* strings = NULL;
 	GList* patterns = NULL;
 	BListFilter* filter;
+	int linelen;
+	
 	strings = purple_prefs_get_string_list(path);
 	for (GList* item = strings; item != NULL; item = item->next)
 	{
 		const gchar* line = (const gchar*)item->data;
-		if (strlen(line) > 0)//we ignore empty filters
+		linelen = strlen(line);
+		if (linelen > 0)//we ignore empty filters
 		{
 			filter = g_new0(BListFilter, 1);
-			if (line[0] == '~') //filters starting with ~ are negative
+			if (line[0] == '~' && linelen > 1) //filters starting with ~ are negative
 			{
 				filter->pattern = g_pattern_spec_new(&line[1]);
-				filter->is_negative = TRUE;
+				filter->type = BLFT_INVERTED;
+			}
+			else if (line[0] == '~' && linelen == 1) //filter consisting of ~ is a catch-all "everything else" filter
+			{
+				filter->pattern = NULL;
+				filter->type = BLFT_MISC;
+			}
+			else if (line[0] == '*' && linelen == 1)
+			{
+				filter->pattern = NULL;
+				filter->type = BLFT_ALL;
 			}
 			else
 			{
 				filter->pattern = g_pattern_spec_new(line);
-				filter->is_negative = FALSE;
+				filter->type = BLFT_REGULAR;
 			}
-			patterns = g_list_append(patterns, filter);
+		patterns = g_list_append(patterns, filter);
 		}
 	}
 	g_list_free_full(g_steal_pointer(&strings), g_free);
@@ -368,8 +390,6 @@ static BListFilterDescription* blistfilter_load_filter_pref(int filter_id)
 	filter->icon_path = purple_prefs_get_path(pref_name_buffer);
 	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_NTH_GROUP, filter_id);
 	filter->group_patterns = blistfilter_prefs_load_patterns(pref_name_buffer);
-	//purple_debug_misc(PLUGIN_ID, "Loaded a filter:\n");
-	//debug_filter(filter);
 	return filter;
 }
 //Frees filter list
@@ -420,7 +440,6 @@ static void blistfilter_button_cb(GtkButton* btn, gpointer user_data)
 	snprintf(pref_name_buffer, PLUGIN_PREF_MAXPATH, PLUGIN_PREF_ROOT "/filters/filter%d", new_filter_id);
 	if (purple_prefs_exists(pref_name_buffer))
 	{
-		//purple_debug_misc(PLUGIN_ID, "Button pressed, selecting filter #%d\n", new_filter_id);
 		purple_prefs_set_int(PLUGIN_PREF_ACTIVE_FILTER, new_filter_id);
 	}
 	else
@@ -683,7 +702,6 @@ static void blistfilter_active_filter_changed_cb(const char* name, PurplePrefTyp
 	filter = (BListFilterDescription*)g_list_nth_data(blistfilter_filters, selected_index);
 	if (filter != NULL)
 	{
-		purple_debug_info(PLUGIN_ID, "Filter #%d: %s is now selected.\n", selected_index, filter->name);
 		blistfilter_update_entire_blist(filter);
 	}
 	else if (selected_index != 0)
@@ -1016,6 +1034,7 @@ static void blistfilter_filter_editor_cb(PurplePluginAction *unused)
 		"    Friends|Family - matches a group named 'Friends' and a group named 'Family'\n"
 		"    Work: *|~Work: IT - matches any group named like 'Work: HR' or 'Work: Accounting', unless it's 'Work: IT'\n"
 		"    ~Work: HR|~Work: IT - matches any group except 'Work: HR' and 'Work: IT'\n"
+		"    ~ - matches everything that can't be seen through the other filters\n"
 		"    Empty pattern (no spaces!) matches everything." 
 	);
 	gtk_box_pack_start(GTK_BOX(dlgbox), toptext, FALSE, FALSE, 0);
@@ -1139,8 +1158,7 @@ static gboolean plugin_load (PurplePlugin * plugin)
 	filter = (BListFilterDescription*)g_list_nth_data(blistfilter_filters, selected_index);
 	//applying the filter to the buddy list
 	blistfilter_update_entire_blist(filter);
-	//purple_debug_misc(PLUGIN_ID, "Selected filter #%d: %s.\n", selected_index, filter ? filter->name : "NULL");
-
+	
 	//connecting to signals
 	//active filter changed - main entry point for filter control
 	purple_prefs_connect_callback(plugin, PLUGIN_PREF_ACTIVE_FILTER, blistfilter_active_filter_changed_cb, NULL);
@@ -1161,7 +1179,6 @@ static gboolean plugin_load (PurplePlugin * plugin)
 	//wehn a conversation gains/loses "has unread messages" status, we need to update our GUI
 	purple_signal_connect(purple_conversations_get_handle(), "conversation-updated", plugin, PURPLE_CALLBACK(blistfilter_convo_has_updated), NULL); 
 	//Done.
-	//purple_debug_info(PLUGIN_ID, "Plugin loaded.\n");
 	return TRUE;
 }
 //this is called when plugin is unloaded, either on Pidgin shutdown or when disabled in Plugins dialog.
@@ -1174,7 +1191,6 @@ static gboolean plugin_unload(PurplePlugin* plugin)
 	//clear out compiled filters
 	blistfilter_free_all_filters();
 	//Done.
-	//purple_debug_info(PLUGIN_ID, "Plugin unloaded.\n");
 	return TRUE;
 }
 //This creates plugin settings dialog window
@@ -1256,7 +1272,7 @@ static PurplePluginInfo info = {
 //Triggers when the plugin is probed by Pidgin
 static void init_plugin (PurplePlugin * plugin)
 {
-	//purple_debug_info(PLUGIN_ID, "Plugin probed.\n");
+	
 }
 
 PURPLE_INIT_PLUGIN (vindicar_buddylistfilter, init_plugin, info)
