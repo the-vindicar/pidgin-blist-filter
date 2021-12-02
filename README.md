@@ -16,5 +16,6 @@ Plugin shows/hides groups in the buddy list depending on their names, matching t
  - "Work: *" will match groups like "Work: IT" or "Work: HR"
  - "Friends|Family" will match both groups "Friends" and "Family"
  - "Work: *|~Work: IT" will match any group starting with "Work: " unless it's "Work: IT"
+ - \~ will match anything not matched by the other patterns (empty or \~ patterns are ignored). Useful if you want a catch-all "Miscellaneous" filter.
  - Empty pattern matches any group - useful if you want to have access to the unfiltered list.
 ![dialog](https://user-images.githubusercontent.com/2130028/139556913-33c74ffc-35b3-43ce-a3b4-04133efb21c5.png)
